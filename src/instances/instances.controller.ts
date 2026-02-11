@@ -196,6 +196,9 @@ export class InstancesController {
         });
       }
 
+      // Create local DB record so the instance appears in sub-user permissions immediately
+      await this.service.ensureInstanceExists(instanceName, userId);
+
       return res.json(data);
     } catch (error) {
       return res.status(500).json({ error: 'Unexpected server error' });

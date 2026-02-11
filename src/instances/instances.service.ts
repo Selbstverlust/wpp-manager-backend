@@ -77,6 +77,22 @@ export class InstancesService {
   }
 
   /**
+   * Ensures an instance record exists in the local DB (creates with default prompt if missing).
+   * Called when a new instance is created on the external API so it immediately
+   * appears in the sub-user permissions list.
+   */
+  async ensureInstanceExists(name: string, userId: string): Promise<Instance> {
+    const existing = await this.repo.findOne({ where: { name, userId } });
+    if (existing) return existing;
+
+    const examplePrompts = await this.examplePromptsService.getAllExamplePrompts();
+    const defaultPrompt = examplePrompts.length > 0 ? examplePrompts[0].prompt : '';
+
+    const newInstance = this.repo.create({ name, userId, prompt: defaultPrompt });
+    return this.repo.save(newInstance);
+  }
+
+  /**
    * Constructs a prefixed instance name for external API calls
    */
   getPrefixedInstanceName(userId: string, userProvidedName: string): string {
