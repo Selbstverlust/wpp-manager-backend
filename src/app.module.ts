@@ -12,6 +12,7 @@ import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { AdminModule } from './admin/admin.module';
 import { PaypalModule } from './paypal/paypal.module';
 import { SubUsersModule } from './sub-users/sub-users.module';
+import { MessagesModule } from './messages/messages.module';
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { SubUsersModule } from './sub-users/sub-users.module';
     AdminModule,
     PaypalModule,
     SubUsersModule,
+    MessagesModule,
   ],
   controllers: [HealthController],
   providers: [
