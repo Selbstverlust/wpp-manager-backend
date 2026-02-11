@@ -34,7 +34,7 @@ export class AuthService {
     } as User;
   }
 
-  async login(user: User): Promise<{ accessToken: string; user: Omit<User, 'password'> }> {
+  async login(user: User): Promise<{ accessToken: string; user: Omit<User, 'password' | 'parentUser' | 'subUsers'> }> {
     const payload = { email: user.email, sub: user.id, role: user.role };
     const accessToken = this.jwtService.sign(payload);
 
@@ -59,7 +59,7 @@ export class AuthService {
     return bcrypt.hash(password, 10);
   }
 
-  async register(registerDto: { email: string; name: string; password: string }): Promise<{ accessToken: string; user: Omit<User, 'password'> }> {
+  async register(registerDto: { email: string; name: string; password: string }): Promise<{ accessToken: string; user: Omit<User, 'password' | 'parentUser' | 'subUsers'> }> {
     // Check if user already exists
     const existingUser = await this.usersService.findByEmail(registerDto.email);
     if (existingUser) {
