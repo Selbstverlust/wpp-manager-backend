@@ -28,6 +28,7 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      parentUserId: user.parentUserId,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     } as User;
@@ -43,6 +44,7 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      parentUserId: user.parentUserId,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };
@@ -77,6 +79,7 @@ export class AuthService {
       email: user.email,
       name: user.name,
       role: user.role,
+      parentUserId: user.parentUserId || null,
       createdAt: user.createdAt,
       updatedAt: user.updatedAt,
     };

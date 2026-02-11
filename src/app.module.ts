@@ -11,6 +11,7 @@ import { PublicAuthGuard } from './auth/public-auth.guard';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { AdminModule } from './admin/admin.module';
 import { PaypalModule } from './paypal/paypal.module';
+import { SubUsersModule } from './sub-users/sub-users.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { PaypalModule } from './paypal/paypal.module';
     SubscriptionsModule,
     AdminModule,
     PaypalModule,
+    SubUsersModule,
   ],
   controllers: [HealthController],
   providers: [

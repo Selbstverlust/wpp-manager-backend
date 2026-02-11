@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, UpdateDateColumn, ManyToOne, OneToMany, JoinColumn, Index } from 'typeorm';
 
 @Entity({ name: 'users' })
 export class User {
@@ -16,6 +16,17 @@ export class User {
 
   @Column({ default: 'user' })
   role: string;
+
+  @Index()
+  @Column({ name: 'parent_user_id', type: 'uuid', nullable: true })
+  parentUserId: string | null;
+
+  @ManyToOne(() => User, (user) => user.subUsers, { onDelete: 'CASCADE', nullable: true })
+  @JoinColumn({ name: 'parent_user_id' })
+  parentUser: User;
+
+  @OneToMany(() => User, (user) => user.parentUser)
+  subUsers: User[];
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
