@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Query, Res, Request, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Res, Request, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { Response } from 'express';
 import { InstancesService } from '../instances/instances.service';
 import { SubUsersService } from '../sub-users/sub-users.service';
@@ -762,6 +762,97 @@ export class MessagesController {
         return res.status(403).json({ error: error.message });
       }
       console.error('Error fetching messages:', error);
+      return res.status(500).json({ error: 'Unexpected server error' });
+    }
+  }
+
+  /**
+   * POST /messages/:instanceName/send-text
+   *
+   * Sends a plain text message via Evolution API v2
+   * endpoint: POST /message/sendText/:prefixedInstanceName
+   *
+   * Body:
+   *   - number  (string, required) – recipient with country code
+   *   - text    (string, required) – message content
+   *   - delay   (number, optional) – presence time in ms before sending
+   *   - linkPreview (boolean, optional) – show link preview
+   *   - quoted  (object, optional) – reply to a message
+   */
+  @Post(':instanceName/send-text')
+  async sendText(
+    @Param('instanceName') instanceName: string,
+    @Body() body: {
+      number: string;
+      text: string;
+      delay?: number;
+      linkPreview?: boolean;
+      quoted?: {
+        key: { id: string };
+        message: { conversation: string };
+      };
+    },
+    @Request() req: any,
+    @Res() res: Response,
+  ) {
+    try {
+      await this.ensureSubUserPermission(req, instanceName);
+      const effectiveUserId = this.getEffectiveUserId(req);
+      const baseUrl = process.env.WPP_API_BASE_URL;
+      const apiKey = process.env.WPP_API_KEY;
+
+      if (!baseUrl || !apiKey) {
+        return res.status(500).json({ error: 'Server misconfiguration' });
+      }
+
+      // Validate required fields
+      if (!body.number || !body.text) {
+        throw new BadRequestException('Fields "number" and "text" are required.');
+      }
+
+      const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+      const prefixedInstanceName = this.instancesService.getPrefixedInstanceName(
+        effectiveUserId,
+        instanceName,
+      );
+
+      // Build the payload, only including optional fields when provided
+      const payload: Record<string, any> = {
+        number: body.number,
+        text: body.text,
+      };
+      if (body.delay != null) payload.delay = body.delay;
+      if (body.linkPreview != null) payload.linkPreview = body.linkPreview;
+      if (body.quoted) payload.quoted = body.quoted;
+
+      const url = `${normalizedBaseUrl}/message/sendText/${encodeURIComponent(prefixedInstanceName)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': apiKey,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        return res.status(response.status).json({
+          error: 'Failed to send message via Evolution API',
+          details: data,
+        });
+      }
+
+      return res.status(201).json(data);
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        return res.status(400).json({ error: error.message });
+      }
+      if (error instanceof ForbiddenException) {
+        return res.status(403).json({ error: error.message });
+      }
+      console.error('Error sending text message:', error);
       return res.status(500).json({ error: 'Unexpected server error' });
     }
   }
