@@ -58,6 +58,15 @@ export class MessagesController {
   }
 
   /**
+   * Checks whether a JID belongs to a WhatsApp group chat (@g.us) or
+   * broadcast list (@broadcast).  These are excluded from all endpoints
+   * so the app only works with individual (1-to-1) chats.
+   */
+  private isGroupOrBroadcastJid(jid: string): boolean {
+    return typeof jid === 'string' && (jid.endsWith('@g.us') || jid === 'status@broadcast');
+  }
+
+  /**
    * Checks whether a JID uses WhatsApp's newer Linked Identifier format.
    */
   private isLidJid(jid: string): boolean {
@@ -548,11 +557,17 @@ export class MessagesController {
             return { chats: [], connected: true, name: inst.displayName };
           }
 
-          // Tag each chat with the instance display name
-          const taggedChats = chats.map((chat: any) => ({
-            ...chat,
-            instanceName: inst.displayName,
-          }));
+          // Tag each chat with the instance display name and filter out
+          // group chats / broadcast lists – only individual chats are kept.
+          const taggedChats = chats
+            .filter((chat: any) => {
+              const jid = chat.remoteJid || chat.id || '';
+              return !this.isGroupOrBroadcastJid(jid);
+            })
+            .map((chat: any) => ({
+              ...chat,
+              instanceName: inst.displayName,
+            }));
 
           return { chats: taggedChats, connected: true, name: inst.displayName };
         } catch (error) {
