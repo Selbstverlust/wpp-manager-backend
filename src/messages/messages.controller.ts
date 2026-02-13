@@ -1,4 +1,4 @@
-import { Controller, Get, Param, Res, Request, ForbiddenException } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, Request, ForbiddenException } from '@nestjs/common';
 import { Response } from 'express';
 import { InstancesService } from '../instances/instances.service';
 import { SubUsersService } from '../sub-users/sub-users.service';
@@ -65,34 +65,73 @@ export class MessagesController {
   }
 
   /**
-   * Normalises a Brazilian phone number inside a JID by ensuring the
-   * 9th-digit prefix is always present.
+   * Extracts just the phone-number digits from a JID's local part.
+   * For @lid JIDs the format is `phone:deviceId@lid` – we strip the
+   * `:deviceId` suffix.  For all other JIDs we return the part before `@`.
+   */
+  private extractPhoneFromJid(jid: string): { phone: string; domain: string } {
+    const atIdx = jid.indexOf('@');
+    if (atIdx < 0) return { phone: jid, domain: '' };
+    const rawLocal = jid.slice(0, atIdx);
+    const domain = jid.slice(atIdx); // includes '@'
+
+    if (domain === '@lid') {
+      const colonIdx = rawLocal.indexOf(':');
+      const phone = colonIdx >= 0 ? rawLocal.slice(0, colonIdx) : rawLocal;
+      return { phone, domain };
+    }
+    return { phone: rawLocal, domain };
+  }
+
+  /**
+   * Normalises a phone-number string by applying the Brazilian 9th-digit
+   * rule.  Returns a canonical `<number>@s.whatsapp.net` JID regardless
+   * of whether the input was @s.whatsapp.net or @lid.
    *
    * Brazilian mobile numbers:
    *   +55 XX 9XXXX-XXXX  (13 digits, canonical)
    *   +55 XX XXXX-XXXX   (12 digits, legacy – missing the leading 9)
    *
-   * If the number already has 13 digits starting with 55 it is returned
-   * unchanged.  For 12-digit numbers starting with 55, a '9' is inserted
-   * after the 2-digit area code.
-   *
-   * Non-Brazilian numbers and group / broadcast JIDs are returned as-is.
+   * Non-Brazilian numbers, group JIDs (@g.us), and broadcast JIDs are
+   * returned as-is.
    */
   private normalizeJid(jid: string): string {
     if (!jid) return jid;
     const atIdx = jid.indexOf('@');
     if (atIdx < 0) return jid;
-    const number = jid.slice(0, atIdx);
-    const domain = jid.slice(atIdx); // includes '@'
 
-    if (domain !== '@s.whatsapp.net') return jid;
-    if (!number.startsWith('55')) return jid;
+    const { phone, domain } = this.extractPhoneFromJid(jid);
 
-    // 12 digits → missing 9th digit → add it after area code (pos 4)
-    if (number.length === 12) {
-      return `55${number.slice(2, 4)}9${number.slice(4)}${domain}`;
+    // For @lid JIDs, map to the canonical @s.whatsapp.net form so they
+    // merge with the standard chat entry during deduplication.
+    if (domain === '@lid') {
+      // Only do this when the local part looks like a phone number
+      if (/^\d{10,15}$/.test(phone)) {
+        const normalized = this.normalizeBrazilianNumber(phone);
+        return `${normalized}@s.whatsapp.net`;
+      }
+      // Opaque LID – can't normalise, return as-is
+      return jid;
     }
-    return jid;
+
+    // Only touch @s.whatsapp.net JIDs
+    if (domain !== '@s.whatsapp.net') return jid;
+
+    const normalized = this.normalizeBrazilianNumber(phone);
+    return `${normalized}${domain}`;
+  }
+
+  /**
+   * Adds the Brazilian 9th digit to a 12-digit number if applicable.
+   * Returns the number string unchanged for non-Brazilian or already-
+   * canonical numbers.
+   */
+  private normalizeBrazilianNumber(phone: string): string {
+    if (!phone.startsWith('55')) return phone;
+    if (phone.length === 12) {
+      return `55${phone.slice(2, 4)}9${phone.slice(4)}`;
+    }
+    return phone;
   }
 
   /**
@@ -404,19 +443,28 @@ export class MessagesController {
   }
 
   /**
-   * GET /messages/:instanceName/:remoteJid
+   * GET /messages/:instanceName/:remoteJid?allJids=jid1,jid2,...
    *
    * Fetches messages for a specific chat from the Evolution API v2
    * endpoint: POST /chat/findMessages/:prefixedInstanceName
    *
-   * To handle Brazilian 9th-digit variants (same contact stored under
-   * two JID formats), this queries ALL plausible JID variations in
-   * parallel and merges the results, deduplicating by message key id.
+   * To handle:
+   *   - Brazilian 9th-digit variants (same contact under two phone formats)
+   *   - WhatsApp LID JIDs (sent messages stored under @lid instead of
+   *     @s.whatsapp.net)
+   *
+   * this endpoint queries ALL plausible JID variations in parallel and
+   * merges the results, deduplicating by message key id.
+   *
+   * The optional `allJids` query parameter lets the frontend pass every
+   * JID variant that was discovered during chat-list deduplication
+   * (including @lid JIDs).
    */
   @Get(':instanceName/:remoteJid')
   async getMessages(
     @Param('instanceName') instanceName: string,
     @Param('remoteJid') remoteJid: string,
+    @Query('allJids') allJidsParam: string,
     @Request() req: any,
     @Res() res: Response,
   ) {
@@ -436,19 +484,37 @@ export class MessagesController {
         instanceName,
       );
 
+      // Collect every JID we need to query --------------------------------
+      const jidsToQuery = new Set<string>();
       const decodedJid = decodeURIComponent(remoteJid);
 
-      // Get all JID variations (e.g. with/without Brazilian 9th digit)
-      const jidVariations = this.getJidVariations(decodedJid);
+      // Primary JID + its Brazilian 9th-digit variants
+      for (const v of this.getJidVariations(decodedJid)) {
+        jidsToQuery.add(v);
+      }
 
-      // Query all variations in parallel
+      // Additional JIDs from the allJids query param (e.g. @lid JIDs that
+      // were merged during chat-list deduplication)
+      if (allJidsParam) {
+        for (const raw of allJidsParam.split(',')) {
+          const decoded = decodeURIComponent(raw.trim());
+          if (!decoded) continue;
+          jidsToQuery.add(decoded);
+          // Also add Brazilian variants for each additional JID
+          for (const v of this.getJidVariations(decoded)) {
+            jidsToQuery.add(v);
+          }
+        }
+      }
+
+      // Query all JIDs in parallel ----------------------------------------
       const allRecordArrays = await Promise.all(
-        jidVariations.map((jid) =>
+        [...jidsToQuery].map((jid) =>
           this.fetchMessagesForJid(normalizedBaseUrl, apiKey, prefixedInstanceName, jid),
         ),
       );
 
-      // Merge and deduplicate by message key id
+      // Merge and deduplicate by message key id ---------------------------
       const seenIds = new Set<string>();
       const mergedRecords: any[] = [];
       for (const records of allRecordArrays) {
