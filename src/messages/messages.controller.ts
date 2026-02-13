@@ -357,6 +357,10 @@ export class MessagesController {
   /**
    * Fetches message records from Evolution API for a single JID.
    * Returns the extracted records array (may be empty).
+   *
+   * This method NEVER throws – any error is logged and an empty array
+   * is returned so that `Promise.all` across JID variations always
+   * resolves and partial results from other variations are preserved.
    */
   private async fetchMessagesForJid(
     baseUrl: string,
@@ -364,26 +368,39 @@ export class MessagesController {
     prefixedInstanceName: string,
     remoteJid: string,
   ): Promise<any[]> {
-    const url = `${baseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', apikey: apiKey },
-      body: JSON.stringify({
-        where: { key: { remoteJid } },
-        offset: 100,
-        page: 1,
-      }),
-    });
+    try {
+      const url = `${baseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: apiKey },
+        body: JSON.stringify({
+          where: { key: { remoteJid } },
+          offset: 100,
+          page: 1,
+        }),
+      });
 
-    if (!response.ok) return [];
+      if (!response.ok) {
+        console.warn(
+          `fetchMessagesForJid: HTTP ${response.status} for ${remoteJid} on ${prefixedInstanceName}`,
+        );
+        return [];
+      }
 
-    const data = await response.json();
-    if (data?.messages?.records && Array.isArray(data.messages.records)) {
-      return data.messages.records;
+      const data = await response.json();
+      if (data?.messages?.records && Array.isArray(data.messages.records)) {
+        return data.messages.records;
+      }
+      if (Array.isArray(data?.messages)) return data.messages;
+      if (Array.isArray(data)) return data;
+      return [];
+    } catch (error) {
+      console.error(
+        `fetchMessagesForJid: error for ${remoteJid} on ${prefixedInstanceName}:`,
+        error,
+      );
+      return [];
     }
-    if (Array.isArray(data?.messages)) return data.messages;
-    if (Array.isArray(data)) return data;
-    return [];
   }
 
   /**
