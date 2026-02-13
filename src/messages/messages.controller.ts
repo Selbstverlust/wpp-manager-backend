@@ -10,6 +10,10 @@ export class MessagesController {
     private readonly subUsersService: SubUsersService,
   ) {}
 
+  // =========================================================================
+  // Auth / identity helpers
+  // =========================================================================
+
   /**
    * Resolves the effective userId for external API calls.
    * For sub-users, uses the parent's userId. For regular users, uses their own id.
@@ -39,6 +43,177 @@ export class MessagesController {
     if (!hasPermission) {
       throw new ForbiddenException('Você não tem permissão para acessar esta instância.');
     }
+  }
+
+  // =========================================================================
+  // JID normalization & deduplication helpers
+  // =========================================================================
+
+  /**
+   * Checks whether a JID is a regular WhatsApp contact (@s.whatsapp.net).
+   * Filters out @lid, @g.us, @broadcast, etc.
+   */
+  private isStandardUserJid(jid: string): boolean {
+    return typeof jid === 'string' && jid.endsWith('@s.whatsapp.net');
+  }
+
+  /**
+   * Checks whether a JID uses WhatsApp's newer Linked Identifier format.
+   */
+  private isLidJid(jid: string): boolean {
+    return typeof jid === 'string' && jid.endsWith('@lid');
+  }
+
+  /**
+   * Normalises a Brazilian phone number inside a JID by ensuring the
+   * 9th-digit prefix is always present.
+   *
+   * Brazilian mobile numbers:
+   *   +55 XX 9XXXX-XXXX  (13 digits, canonical)
+   *   +55 XX XXXX-XXXX   (12 digits, legacy – missing the leading 9)
+   *
+   * If the number already has 13 digits starting with 55 it is returned
+   * unchanged.  For 12-digit numbers starting with 55, a '9' is inserted
+   * after the 2-digit area code.
+   *
+   * Non-Brazilian numbers and group / broadcast JIDs are returned as-is.
+   */
+  private normalizeJid(jid: string): string {
+    if (!jid) return jid;
+    const atIdx = jid.indexOf('@');
+    if (atIdx < 0) return jid;
+    const number = jid.slice(0, atIdx);
+    const domain = jid.slice(atIdx); // includes '@'
+
+    if (domain !== '@s.whatsapp.net') return jid;
+    if (!number.startsWith('55')) return jid;
+
+    // 12 digits → missing 9th digit → add it after area code (pos 4)
+    if (number.length === 12) {
+      return `55${number.slice(2, 4)}9${number.slice(4)}${domain}`;
+    }
+    return jid;
+  }
+
+  /**
+   * Returns all plausible JID variants for a given phone JID so we can
+   * query messages stored under any of them.
+   *
+   * For Brazilian numbers this returns both the 12- and 13-digit forms.
+   */
+  private getJidVariations(jid: string): string[] {
+    if (!jid) return [jid];
+    const atIdx = jid.indexOf('@');
+    if (atIdx < 0) return [jid];
+    const number = jid.slice(0, atIdx);
+    const domain = jid.slice(atIdx);
+
+    if (domain !== '@s.whatsapp.net' || !number.startsWith('55')) return [jid];
+
+    const variations: string[] = [jid];
+    if (number.length === 13 && number[4] === '9') {
+      // With 9th digit → also try without
+      variations.push(`55${number.slice(2, 4)}${number.slice(5)}${domain}`);
+    } else if (number.length === 12) {
+      // Without 9th digit → also try with
+      variations.push(`55${number.slice(2, 4)}9${number.slice(4)}${domain}`);
+    }
+    return variations;
+  }
+
+  /**
+   * Extracts the chat timestamp (unix seconds) from the Evolution API v2
+   * chat object.  The API returns `lastMessage.messageTimestamp` and/or
+   * `updatedAt` – NOT `lastMsgTimestamp` or `conversationTimestamp`.
+   */
+  private getChatTimestamp(chat: any): number {
+    // Prefer lastMessage.messageTimestamp (unix seconds)
+    const msgTs = chat.lastMessage?.messageTimestamp;
+    if (msgTs) {
+      if (typeof msgTs === 'object' && msgTs.low != null) return msgTs.low;
+      const n = typeof msgTs === 'number' ? msgTs : parseInt(String(msgTs), 10);
+      if (n > 0) return n;
+    }
+    // Fallback: updatedAt (ISO date string)
+    if (chat.updatedAt) {
+      const ms = new Date(chat.updatedAt).getTime();
+      if (!isNaN(ms)) return Math.floor(ms / 1000);
+    }
+    // Legacy field names (in case a different API version sends them)
+    for (const field of ['lastMsgTimestamp', 'conversationTimestamp']) {
+      const val = chat[field];
+      if (val) {
+        if (typeof val === 'object' && val.low != null) return val.low;
+        const n = typeof val === 'number' ? val : parseInt(String(val), 10);
+        if (n > 0) return n;
+      }
+    }
+    return 0;
+  }
+
+  /**
+   * Deduplicates the aggregated chat list.
+   *
+   * 1. Filters out @lid JIDs that have a corresponding @s.whatsapp.net entry
+   *    (keeps @lid only when it is the sole chat for that instance+contact).
+   * 2. Merges Brazilian number variants (with/without 9th digit) into one
+   *    entry, keeping the one with the most recent message and combining
+   *    unread counts.
+   */
+  private deduplicateChats(chats: any[]): any[] {
+    // Key = normalizedJid + '|' + instanceName
+    const map = new Map<string, { chat: any; allJids: string[] }>();
+    // Track which normalised keys have a @s.whatsapp.net entry
+    const hasStandardJid = new Set<string>();
+
+    for (const chat of chats) {
+      const rawJid: string = chat.remoteJid || chat.id || '';
+      if (!rawJid) continue;
+
+      const normalized = this.normalizeJid(rawJid);
+      const key = `${normalized}|${chat.instanceName}`;
+      const isStandard = this.isStandardUserJid(rawJid);
+      if (isStandard) hasStandardJid.add(key);
+
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, { chat: { ...chat, _allJids: [rawJid] }, allJids: [rawJid] });
+      } else {
+        // Merge: keep the entry with the most recent message
+        existing.allJids.push(rawJid);
+        existing.chat._allJids = existing.allJids;
+
+        const existingTs = this.getChatTimestamp(existing.chat);
+        const newTs = this.getChatTimestamp(chat);
+
+        if (newTs > existingTs) {
+          // New chat is more recent – replace but keep merged data
+          const mergedUnread = (existing.chat.unreadCount || 0) + (chat.unreadCount || 0);
+          const allJids = [...existing.allJids];
+          existing.chat = { ...chat, _allJids: allJids, unreadCount: mergedUnread };
+        } else {
+          // Existing is more recent – just add unread
+          existing.chat.unreadCount =
+            (existing.chat.unreadCount || 0) + (chat.unreadCount || 0);
+        }
+
+        // Prefer the @s.whatsapp.net JID for display
+        if (isStandard && !this.isStandardUserJid(existing.chat.remoteJid)) {
+          existing.chat.remoteJid = rawJid;
+        }
+      }
+    }
+
+    // Filter out @lid-only entries when a standard JID exists for the same key
+    const result: any[] = [];
+    for (const [key, entry] of map.entries()) {
+      const rawJid: string = entry.chat.remoteJid || entry.chat.id || '';
+      // If this entry is LID-only and a standard JID exists for the same
+      // normalised key, skip it (it was already merged above).
+      if (this.isLidJid(rawJid) && hasStandardJid.has(key)) continue;
+      result.push(entry.chat);
+    }
+    return result;
   }
 
   /**
@@ -151,24 +326,20 @@ export class MessagesController {
       const results = await Promise.all(chatPromises);
 
       // 5. Aggregate all chats
-      const allChats = results.flatMap((r) => r.chats);
+      const rawChats = results.flatMap((r) => r.chats);
       const instanceStatuses = results.map((r) => ({
         name: r.name,
         connected: r.connected,
       }));
 
-      // 6. Sort by most recent message timestamp (descending)
-      // Evolution API v2 uses Unix timestamps (seconds) for lastMsgTimestamp / conversationTimestamp
+      // 6. Deduplicate chats (merges Brazilian 9th-digit variants, filters @lid dupes)
+      const allChats = this.deduplicateChats(rawChats);
+
+      // 7. Sort by most recent message timestamp (descending)
+      //    Evolution API v2 returns timestamps inside lastMessage.messageTimestamp
+      //    or updatedAt – NOT at the top-level lastMsgTimestamp field.
       allChats.sort((a: any, b: any) => {
-        const timeA = a.lastMsgTimestamp || a.conversationTimestamp || 0;
-        const timeB = b.lastMsgTimestamp || b.conversationTimestamp || 0;
-        const normalizedA = typeof timeA === 'object' && timeA.low != null
-          ? timeA.low
-          : (typeof timeA === 'number' ? timeA : parseInt(String(timeA), 10) || 0);
-        const normalizedB = typeof timeB === 'object' && timeB.low != null
-          ? timeB.low
-          : (typeof timeB === 'number' ? timeB : parseInt(String(timeB), 10) || 0);
-        return normalizedB - normalizedA;
+        return this.getChatTimestamp(b) - this.getChatTimestamp(a);
       });
 
       return res.json({
@@ -184,12 +355,46 @@ export class MessagesController {
   }
 
   /**
+   * Fetches message records from Evolution API for a single JID.
+   * Returns the extracted records array (may be empty).
+   */
+  private async fetchMessagesForJid(
+    baseUrl: string,
+    apiKey: string,
+    prefixedInstanceName: string,
+    remoteJid: string,
+  ): Promise<any[]> {
+    const url = `${baseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: apiKey },
+      body: JSON.stringify({
+        where: { key: { remoteJid } },
+        offset: 100,
+        page: 1,
+      }),
+    });
+
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    if (data?.messages?.records && Array.isArray(data.messages.records)) {
+      return data.messages.records;
+    }
+    if (Array.isArray(data?.messages)) return data.messages;
+    if (Array.isArray(data)) return data;
+    return [];
+  }
+
+  /**
    * GET /messages/:instanceName/:remoteJid
    *
    * Fetches messages for a specific chat from the Evolution API v2
    * endpoint: POST /chat/findMessages/:prefixedInstanceName
    *
-   * The remoteJid should be URL-encoded when passed as a path param.
+   * To handle Brazilian 9th-digit variants (same contact stored under
+   * two JID formats), this queries ALL plausible JID variations in
+   * parallel and merges the results, deduplicating by message key id.
    */
   @Get(':instanceName/:remoteJid')
   async getMessages(
@@ -214,52 +419,35 @@ export class MessagesController {
         instanceName,
       );
 
-      // Call Evolution API v2: POST /chat/findMessages/:instanceName
-      // The response is a paginated object: { messages: { total, pages, currentPage, records: [...] } }
-      const messagesUrl = `${normalizedBaseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
-      const upstreamResponse = await fetch(messagesUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'apikey': apiKey,
-        },
-        body: JSON.stringify({
-          where: {
-            key: {
-              remoteJid: decodeURIComponent(remoteJid),
-            },
-          },
-          offset: 100,
-          page: 1,
-        }),
-      });
+      const decodedJid = decodeURIComponent(remoteJid);
 
-      if (!upstreamResponse.ok) {
-        const errorData = await upstreamResponse.json().catch(() => ({}));
-        return res.status(upstreamResponse.status).json({
-          error: 'Failed to fetch messages',
-          details: errorData,
-        });
-      }
+      // Get all JID variations (e.g. with/without Brazilian 9th digit)
+      const jidVariations = this.getJidVariations(decodedJid);
 
-      const data = await upstreamResponse.json();
+      // Query all variations in parallel
+      const allRecordArrays = await Promise.all(
+        jidVariations.map((jid) =>
+          this.fetchMessagesForJid(normalizedBaseUrl, apiKey, prefixedInstanceName, jid),
+        ),
+      );
 
-      // Extract the actual message records from the paginated response
-      // Evolution API v2 returns: { messages: { total, pages, currentPage, records: [...] } }
-      let records: any[] = [];
-      if (data?.messages?.records && Array.isArray(data.messages.records)) {
-        records = data.messages.records;
-      } else if (Array.isArray(data?.messages)) {
-        records = data.messages;
-      } else if (Array.isArray(data)) {
-        records = data;
+      // Merge and deduplicate by message key id
+      const seenIds = new Set<string>();
+      const mergedRecords: any[] = [];
+      for (const records of allRecordArrays) {
+        for (const record of records) {
+          const keyId = record.key?.id || record.id;
+          if (keyId && seenIds.has(keyId)) continue;
+          if (keyId) seenIds.add(keyId);
+          mergedRecords.push(record);
+        }
       }
 
       return res.json({
-        messages: records,
-        total: data?.messages?.total || records.length,
-        pages: data?.messages?.pages || 1,
-        currentPage: data?.messages?.currentPage || 1,
+        messages: mergedRecords,
+        total: mergedRecords.length,
+        pages: 1,
+        currentPage: 1,
       });
     } catch (error) {
       if (error instanceof ForbiddenException) {
