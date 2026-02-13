@@ -100,13 +100,21 @@ export class MessagesController {
     const atIdx = jid.indexOf('@');
     if (atIdx < 0) return jid;
 
+    const rawLocal = jid.slice(0, atIdx);
     const { phone, domain } = this.extractPhoneFromJid(jid);
 
     // For @lid JIDs, map to the canonical @s.whatsapp.net form so they
     // merge with the standard chat entry during deduplication.
     if (domain === '@lid') {
-      // Only do this when the local part looks like a phone number
-      if (/^\d{10,15}$/.test(phone)) {
+      // Only normalise when we're confident the local part contains a
+      // real phone number.  Older WhatsApp versions use the format
+      // `phone:deviceId@lid` (colon-separated) where the part before the
+      // colon is the actual phone number.  Newer versions use opaque
+      // numeric identifiers with NO colon – these can't be reliably
+      // mapped to a phone number and must be left as-is so the second
+      // deduplication pass can match them by name/pushName instead.
+      const hasDeviceId = rawLocal.includes(':');
+      if (hasDeviceId && /^\d{10,15}$/.test(phone)) {
         const normalized = this.normalizeBrazilianNumber(phone);
         return `${normalized}@s.whatsapp.net`;
       }
@@ -240,6 +248,91 @@ export class MessagesController {
         if (isStandard && !this.isStandardUserJid(existing.chat.remoteJid)) {
           existing.chat.remoteJid = rawJid;
         }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Second pass – merge remaining @lid entries that couldn't be normalised
+    // by phone number.  Newer WhatsApp versions use opaque numeric LIDs that
+    // don't contain the phone number, so normalizeJid returns them as-is and
+    // they remain unmerged.  We attempt to match them to @s.whatsapp.net
+    // chats in the same instance by comparing name / pushName.
+    // -----------------------------------------------------------------------
+    const unmatchedLidKeys: string[] = [];
+    const standardByInstance = new Map<
+      string,
+      Array<{ key: string; entry: { chat: any; allJids: string[] } }>
+    >();
+
+    for (const [key, entry] of map.entries()) {
+      const rawJid: string = entry.chat.remoteJid || entry.chat.id || '';
+      if (this.isLidJid(rawJid) && !hasStandardJid.has(key)) {
+        unmatchedLidKeys.push(key);
+      } else if (!this.isLidJid(rawJid)) {
+        const inst = entry.chat.instanceName || '';
+        if (!standardByInstance.has(inst)) standardByInstance.set(inst, []);
+        standardByInstance.get(inst)!.push({ key, entry });
+      }
+    }
+
+    for (const lidKey of unmatchedLidKeys) {
+      const lidEntry = map.get(lidKey);
+      if (!lidEntry) continue;
+
+      const lidChat = lidEntry.chat;
+      const lidName = (lidChat.name || '').trim().toLowerCase();
+      const lidPushName = (lidChat.pushName || '').trim().toLowerCase();
+      const lidInstance = lidChat.instanceName || '';
+      const candidates = standardByInstance.get(lidInstance) || [];
+
+      let matched = false;
+
+      if (lidName || lidPushName) {
+        for (const std of candidates) {
+          const stdChat = std.entry.chat;
+          const stdName = (stdChat.name || '').trim().toLowerCase();
+          const stdPushName = (stdChat.pushName || '').trim().toLowerCase();
+
+          const nameMatch = !!(lidName && stdName && lidName === stdName);
+          const pushNameMatch = !!(lidPushName && stdPushName && lidPushName === stdPushName);
+
+          if (nameMatch || pushNameMatch) {
+            // Merge the @lid JIDs into the standard chat's _allJids
+            for (const jid of lidEntry.allJids) {
+              if (!std.entry.allJids.includes(jid)) {
+                std.entry.allJids.push(jid);
+              }
+            }
+            std.entry.chat._allJids = std.entry.allJids;
+
+            // Merge unread counts
+            std.entry.chat.unreadCount =
+              (std.entry.chat.unreadCount || 0) + (lidChat.unreadCount || 0);
+
+            // If the @lid chat has a more recent last message, adopt it
+            const existingTs = this.getChatTimestamp(std.entry.chat);
+            const lidTs = this.getChatTimestamp(lidChat);
+            if (lidTs > existingTs && lidChat.lastMessage) {
+              std.entry.chat.lastMessage = lidChat.lastMessage;
+            }
+
+            map.delete(lidKey);
+            matched = true;
+            break;
+          }
+        }
+      }
+
+      if (!matched) {
+        // Remove unmatched @lid entries – they appear as confusing numeric
+        // chats and only contain self-sent messages that can't be associated
+        // with a known contact without the WhatsApp LID-to-phone mapping.
+        console.warn(
+          `deduplicateChats: removing unmatched @lid chat ` +
+            `jid="${lidChat.remoteJid || lidChat.id}" instance="${lidInstance}" ` +
+            `name="${lidChat.name || ''}" pushName="${lidChat.pushName || ''}"`,
+        );
+        map.delete(lidKey);
       }
     }
 
