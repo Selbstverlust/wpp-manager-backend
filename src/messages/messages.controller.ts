@@ -207,11 +207,16 @@ export class MessagesController {
    *    entry, keeping the one with the most recent message and combining
    *    unread counts.
    */
-  private deduplicateChats(chats: any[]): any[] {
+  private deduplicateChats(
+    chats: any[],
+  ): { chats: any[]; unmatchedLidsByInstance: Map<string, string[]> } {
     // Key = normalizedJid + '|' + instanceName
     const map = new Map<string, { chat: any; allJids: string[] }>();
     // Track which normalised keys have a @s.whatsapp.net entry
     const hasStandardJid = new Set<string>();
+    // Collect @lid JIDs that can't be resolved by phone or name matching,
+    // grouped by instance – the caller will resolve them via findContacts.
+    const unmatchedLidsByInstance = new Map<string, string[]>();
 
     for (const chat of chats) {
       const rawJid: string = chat.remoteJid || chat.id || '';
@@ -324,14 +329,15 @@ export class MessagesController {
       }
 
       if (!matched) {
-        // Remove unmatched @lid entries – they appear as confusing numeric
-        // chats and only contain self-sent messages that can't be associated
-        // with a known contact without the WhatsApp LID-to-phone mapping.
-        console.warn(
-          `deduplicateChats: removing unmatched @lid chat ` +
-            `jid="${lidChat.remoteJid || lidChat.id}" instance="${lidInstance}" ` +
-            `name="${lidChat.name || ''}" pushName="${lidChat.pushName || ''}"`,
-        );
+        // Collect unmatched @lid JIDs so the caller can resolve them via
+        // the Evolution API contacts endpoint (which provides the
+        // authoritative lid → phoneNumber mapping from Baileys).
+        if (!unmatchedLidsByInstance.has(lidInstance)) {
+          unmatchedLidsByInstance.set(lidInstance, []);
+        }
+        for (const jid of lidEntry.allJids) {
+          unmatchedLidsByInstance.get(lidInstance)!.push(jid);
+        }
         map.delete(lidKey);
       }
     }
@@ -345,7 +351,107 @@ export class MessagesController {
       if (this.isLidJid(rawJid) && hasStandardJid.has(key)) continue;
       result.push(entry.chat);
     }
-    return result;
+    return { chats: result, unmatchedLidsByInstance };
+  }
+
+  /**
+   * Resolves unmatched @lid JIDs by calling the Evolution API's findContacts
+   * endpoint.  Baileys' Contact type exposes both `lid` (@lid JID) and
+   * `phoneNumber` (@s.whatsapp.net JID) for every contact, giving us the
+   * authoritative mapping.
+   *
+   * For each resolved LID, the corresponding @s.whatsapp.net chat's
+   * `_allJids` is updated so that subsequent message fetches will query
+   * the @lid JID and return the missing self-sent messages.
+   */
+  private async resolveUnmatchedLids(
+    baseUrl: string,
+    apiKey: string,
+    chats: any[],
+    unmatchedLidsByInstance: Map<string, string[]>,
+    userInstances: any[],
+  ): Promise<void> {
+    for (const [instanceName, lidJids] of unmatchedLidsByInstance.entries()) {
+      const inst = userInstances.find((i: any) => i.displayName === instanceName);
+      if (!inst) continue;
+
+      try {
+        const contactsUrl = `${baseUrl}/chat/findContacts/${encodeURIComponent(inst.fullName)}`;
+        const contactsResp = await fetch(contactsUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: apiKey },
+          body: JSON.stringify({}),
+        });
+
+        if (!contactsResp.ok) {
+          console.warn(
+            `resolveUnmatchedLids: findContacts failed for ${instanceName}: HTTP ${contactsResp.status}`,
+          );
+          continue;
+        }
+
+        const contacts = await contactsResp.json();
+        if (!Array.isArray(contacts)) continue;
+
+        // Build a LID → phone JID mapping from the Baileys Contact objects.
+        // Baileys stores:
+        //   contact.lid          – @lid JID
+        //   contact.phoneNumber  – @s.whatsapp.net JID
+        //   contact.id           – primary id (may be either format)
+        const lidToPhone = new Map<string, string>();
+        for (const contact of contacts) {
+          const lid: string | undefined = contact.lid || contact.lidJid;
+          // Prefer phoneNumber, fall back to id if it's a standard JID
+          let phone: string | undefined = contact.phoneNumber;
+          if (!phone) {
+            const id: string = contact.id || contact.remoteJid || '';
+            if (id.endsWith('@s.whatsapp.net')) phone = id;
+          }
+          if (lid && phone) {
+            lidToPhone.set(lid, phone);
+          }
+        }
+
+        // Merge resolved LIDs into the correct chats
+        for (const lidJid of lidJids) {
+          const phoneJid = lidToPhone.get(lidJid);
+          if (!phoneJid) {
+            console.warn(
+              `resolveUnmatchedLids: no contact mapping for @lid "${lidJid}" ` +
+                `in instance "${instanceName}"`,
+            );
+            continue;
+          }
+
+          // Find the standard chat that matches this phone JID
+          // (account for Brazilian 9th-digit variants)
+          const phoneVariations = this.getJidVariations(phoneJid);
+          const chat = chats.find(
+            (c) =>
+              c.instanceName === instanceName &&
+              (phoneVariations.includes(c.remoteJid) ||
+                (c._allJids && c._allJids.some((j: string) => phoneVariations.includes(j)))),
+          );
+
+          if (chat) {
+            if (!chat._allJids) chat._allJids = [chat.remoteJid || chat.id];
+            if (!chat._allJids.includes(lidJid)) {
+              chat._allJids.push(lidJid);
+            }
+          } else {
+            console.warn(
+              `resolveUnmatchedLids: found phone JID "${phoneJid}" for LID "${lidJid}" ` +
+                `but no matching chat in instance "${instanceName}"`,
+            );
+          }
+        }
+      } catch (error) {
+        console.error(
+          `resolveUnmatchedLids: error fetching contacts for ${instanceName}:`,
+          error,
+        );
+      }
+    }
   }
 
   /**
@@ -465,9 +571,20 @@ export class MessagesController {
       }));
 
       // 6. Deduplicate chats (merges Brazilian 9th-digit variants, filters @lid dupes)
-      const allChats = this.deduplicateChats(rawChats);
+      const { chats: allChats, unmatchedLidsByInstance } = this.deduplicateChats(rawChats);
 
-      // 7. Sort by most recent message timestamp (descending)
+      // 7. Resolve any remaining @lid JIDs via the contacts API
+      if (unmatchedLidsByInstance.size > 0) {
+        await this.resolveUnmatchedLids(
+          normalizedBaseUrl,
+          apiKey,
+          allChats,
+          unmatchedLidsByInstance,
+          userInstances,
+        );
+      }
+
+      // 8. Sort by most recent message timestamp (descending)
       //    Evolution API v2 returns timestamps inside lastMessage.messageTimestamp
       //    or updatedAt – NOT at the top-level lastMsgTimestamp field.
       allChats.sort((a: any, b: any) => {
