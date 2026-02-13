@@ -215,6 +215,7 @@ export class MessagesController {
       );
 
       // Call Evolution API v2: POST /chat/findMessages/:instanceName
+      // The response is a paginated object: { messages: { total, pages, currentPage, records: [...] } }
       const messagesUrl = `${normalizedBaseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
       const upstreamResponse = await fetch(messagesUrl, {
         method: 'POST',
@@ -228,6 +229,8 @@ export class MessagesController {
               remoteJid: decodeURIComponent(remoteJid),
             },
           },
+          offset: 100,
+          page: 1,
         }),
       });
 
@@ -239,10 +242,24 @@ export class MessagesController {
         });
       }
 
-      const messages = await upstreamResponse.json();
+      const data = await upstreamResponse.json();
+
+      // Extract the actual message records from the paginated response
+      // Evolution API v2 returns: { messages: { total, pages, currentPage, records: [...] } }
+      let records: any[] = [];
+      if (data?.messages?.records && Array.isArray(data.messages.records)) {
+        records = data.messages.records;
+      } else if (Array.isArray(data?.messages)) {
+        records = data.messages;
+      } else if (Array.isArray(data)) {
+        records = data;
+      }
 
       return res.json({
-        messages: Array.isArray(messages) ? messages : [],
+        messages: records,
+        total: data?.messages?.total || records.length,
+        pages: data?.messages?.pages || 1,
+        currentPage: data?.messages?.currentPage || 1,
       });
     } catch (error) {
       if (error instanceof ForbiddenException) {
