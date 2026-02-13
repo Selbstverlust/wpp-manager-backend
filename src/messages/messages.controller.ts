@@ -1,4 +1,4 @@
-import { Controller, Get, Res, Request } from '@nestjs/common';
+import { Controller, Get, Param, Res, Request, ForbiddenException } from '@nestjs/common';
 import { Response } from 'express';
 import { InstancesService } from '../instances/instances.service';
 import { SubUsersService } from '../sub-users/sub-users.service';
@@ -23,6 +23,22 @@ export class MessagesController {
    */
   private isSubUser(req: any): boolean {
     return !!req.user.parentUserId;
+  }
+
+  /**
+   * For sub-users, checks permission for a specific instance name
+   */
+  private async ensureSubUserPermission(req: any, instanceName: string): Promise<void> {
+    if (!this.isSubUser(req)) return;
+    const ownerUserId = req.user.parentUserId;
+    const hasPermission = await this.subUsersService.hasPermissionForInstance(
+      req.user.id,
+      instanceName,
+      ownerUserId,
+    );
+    if (!hasPermission) {
+      throw new ForbiddenException('Você não tem permissão para acessar esta instância.');
+    }
   }
 
   /**
@@ -163,6 +179,76 @@ export class MessagesController {
       });
     } catch (error) {
       console.error('Error fetching messages/chats:', error);
+      return res.status(500).json({ error: 'Unexpected server error' });
+    }
+  }
+
+  /**
+   * GET /messages/:instanceName/:remoteJid
+   *
+   * Fetches messages for a specific chat from the Evolution API v2
+   * endpoint: POST /chat/findMessages/:prefixedInstanceName
+   *
+   * The remoteJid should be URL-encoded when passed as a path param.
+   */
+  @Get(':instanceName/:remoteJid')
+  async getMessages(
+    @Param('instanceName') instanceName: string,
+    @Param('remoteJid') remoteJid: string,
+    @Request() req: any,
+    @Res() res: Response,
+  ) {
+    try {
+      await this.ensureSubUserPermission(req, instanceName);
+      const effectiveUserId = this.getEffectiveUserId(req);
+      const baseUrl = process.env.WPP_API_BASE_URL;
+      const apiKey = process.env.WPP_API_KEY;
+
+      if (!baseUrl || !apiKey) {
+        return res.status(500).json({ error: 'Server misconfiguration' });
+      }
+
+      const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+      const prefixedInstanceName = this.instancesService.getPrefixedInstanceName(
+        effectiveUserId,
+        instanceName,
+      );
+
+      // Call Evolution API v2: POST /chat/findMessages/:instanceName
+      const messagesUrl = `${normalizedBaseUrl}/chat/findMessages/${encodeURIComponent(prefixedInstanceName)}`;
+      const upstreamResponse = await fetch(messagesUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': apiKey,
+        },
+        body: JSON.stringify({
+          where: {
+            key: {
+              remoteJid: decodeURIComponent(remoteJid),
+            },
+          },
+        }),
+      });
+
+      if (!upstreamResponse.ok) {
+        const errorData = await upstreamResponse.json().catch(() => ({}));
+        return res.status(upstreamResponse.status).json({
+          error: 'Failed to fetch messages',
+          details: errorData,
+        });
+      }
+
+      const messages = await upstreamResponse.json();
+
+      return res.json({
+        messages: Array.isArray(messages) ? messages : [],
+      });
+    } catch (error) {
+      if (error instanceof ForbiddenException) {
+        return res.status(403).json({ error: error.message });
+      }
+      console.error('Error fetching messages:', error);
       return res.status(500).json({ error: 'Unexpected server error' });
     }
   }
