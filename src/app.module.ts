@@ -13,6 +13,7 @@ import { AdminModule } from './admin/admin.module';
 import { PaypalModule } from './paypal/paypal.module';
 import { SubUsersModule } from './sub-users/sub-users.module';
 import { MessagesModule } from './messages/messages.module';
+import { CategoriesModule } from './categories/categories.module';
 
 @Module({
   imports: [
@@ -42,6 +43,7 @@ import { MessagesModule } from './messages/messages.module';
     PaypalModule,
     SubUsersModule,
     MessagesModule,
+    CategoriesModule,
   ],
   controllers: [HealthController],
   providers: [
