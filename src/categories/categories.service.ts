@@ -103,4 +103,30 @@ export class CategoriesService {
       userId,
     });
   }
+
+  async reorderChats(
+    categoryId: string,
+    userId: string,
+    chats: { remoteJid: string; instanceName: string }[],
+  ): Promise<void> {
+    // Optionally verify category belongs to user
+    const category = await this.categoryRepo.findOne({
+      where: { id: categoryId, userId },
+    });
+    if (!category) throw new NotFoundException('Categoria não encontrada');
+
+    const assignments = await this.assignmentRepo.find({ where: { categoryId, userId } });
+    
+    await Promise.all(
+      chats.map((chat, index) => {
+        const found = assignments.find(
+          (a) => a.remoteJid === chat.remoteJid && a.instanceName === chat.instanceName
+        );
+        if (found) {
+          found.position = index;
+          return this.assignmentRepo.save(found);
+        }
+      })
+    );
+  }
 }

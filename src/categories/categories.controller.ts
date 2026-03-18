@@ -92,4 +92,15 @@ export class CategoriesController {
       instanceName: body.instanceName,
     });
   }
+
+  @Patch(':id/reorder-chats')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async reorderChats(
+    @Param('id') categoryId: string,
+    @Request() req: any,
+    @Body() body: { chats: { remoteJid: string; instanceName: string }[] },
+  ) {
+    const userId = this.getEffectiveUserId(req);
+    await this.categoriesService.reorderChats(categoryId, userId, body.chats);
+  }
 }

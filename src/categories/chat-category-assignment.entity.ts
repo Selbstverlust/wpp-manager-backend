@@ -38,6 +38,9 @@ export class ChatCategoryAssignment {
   @JoinColumn({ name: 'user_id' })
   user: User;
 
+  @Column({ name: 'position', type: 'int', default: 0 })
+  position: number;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 }
