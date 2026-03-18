@@ -25,8 +25,8 @@ import { CategoriesModule } from './categories/categories.module';
       username: process.env.DB_USER,
       password: process.env.DB_PASS,
       database: process.env.DB_NAME,
-      // In development, automatically create/update tables to match entities
-      synchronize: process.env.NODE_ENV !== 'production',
+      // Automatically create/update tables to match entities (habilitado para deploy do position)
+      synchronize: true,
       // Load entities without needing to register feature modules
       entities: [__dirname + '/**/*.entity{.ts,.js}'],
       // Load migrations
