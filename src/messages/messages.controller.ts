@@ -609,7 +609,8 @@ export class MessagesController {
       });
 
       // Keep Evolution websocket relay connected only to accessible instances.
-      this.messagesRealtimeService.setWatchedInstances(
+      this.messagesRealtimeService.setWatchedInstancesForUser(
+        effectiveUserId,
         userInstances.map((inst: any) => inst.fullName).filter(Boolean),
       );
 

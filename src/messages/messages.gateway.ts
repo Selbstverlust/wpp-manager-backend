@@ -73,6 +73,17 @@ export class MessagesGateway implements OnGatewayInit, OnGatewayConnection, OnGa
 
   handleDisconnect(@ConnectedSocket() client: WsClient): void {
     client.removeAllListeners();
+    // Clean up Evolution API sockets if this user has no more connected clients.
+    const ownerUserId = client.data?.parentUserId || client.data?.userId;
+    if (ownerUserId) {
+      // Only remove if no other socket in the same room is still connected.
+      const room = this.getRoomForUser(ownerUserId);
+      const roomSockets = this.server.sockets.adapter.rooms.get(room);
+      const remainingCount = roomSockets ? roomSockets.size : 0;
+      if (remainingCount === 0) {
+        this.realtimeService.removeWatchedInstancesForUser(ownerUserId);
+      }
+    }
   }
 
   @SubscribeMessage('messages:watch-instances')
@@ -85,7 +96,7 @@ export class MessagesGateway implements OnGatewayInit, OnGatewayConnection, OnGa
     // Relay is owner-scoped; instance names are display names only.
     const ownerUserId = client.data.parentUserId || client.data.userId;
     const fullNames = instances.map((name) => `${ownerUserId}_${name}`);
-    this.realtimeService.setWatchedInstances(fullNames);
+    this.realtimeService.setWatchedInstancesForUser(ownerUserId, fullNames);
     return { ok: true };
   }
 

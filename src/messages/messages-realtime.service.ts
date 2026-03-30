@@ -16,6 +16,8 @@ export class MessagesRealtimeService implements OnModuleDestroy {
   private readonly logger = new Logger(MessagesRealtimeService.name);
   private readonly socketsByInstance = new Map<string, Socket>();
   private readonly listeners = new Set<RealtimeListener>();
+  /** Tracks which full instance names each owner user wants to watch. */
+  private readonly instancesByUser = new Map<string, Set<string>>();
   private readonly wantedEvents = [
     'MESSAGES_UPSERT',
     'MESSAGES_UPDATE',
@@ -27,17 +29,24 @@ export class MessagesRealtimeService implements OnModuleDestroy {
     'SEND_MESSAGE',
   ];
 
-  setWatchedInstances(fullInstanceNames: string[]): void {
+  /**
+   * Replaces the set of instances watched on behalf of a specific owner user,
+   * then recomputes the global union. Instances no longer needed by any user
+   * are disconnected; new ones get a socket opened.
+   */
+  setWatchedInstancesForUser(ownerUserId: string, fullInstanceNames: string[]): void {
     const next = new Set(fullInstanceNames.filter(Boolean));
-    for (const fullInstanceName of next) {
-      this.ensureSocket(fullInstanceName);
-    }
-    for (const [fullInstanceName, socket] of this.socketsByInstance.entries()) {
-      if (!next.has(fullInstanceName)) {
-        socket.disconnect();
-        this.socketsByInstance.delete(fullInstanceName);
-      }
-    }
+    this.instancesByUser.set(ownerUserId, next);
+    this.reconcileSockets();
+  }
+
+  /**
+   * Removes all watched instances for a user (e.g. when they disconnect).
+   * Instances no longer needed by any remaining user are disconnected.
+   */
+  removeWatchedInstancesForUser(ownerUserId: string): void {
+    this.instancesByUser.delete(ownerUserId);
+    this.reconcileSockets();
   }
 
   emitOptimisticMessage(params: {
@@ -58,6 +67,27 @@ export class MessagesRealtimeService implements OnModuleDestroy {
   subscribe(listener: RealtimeListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  private reconcileSockets(): void {
+    // Build the union of all instances wanted by any user.
+    const globalWanted = new Set<string>();
+    for (const instances of this.instancesByUser.values()) {
+      for (const name of instances) globalWanted.add(name);
+    }
+
+    // Open sockets for newly wanted instances.
+    for (const name of globalWanted) {
+      this.ensureSocket(name);
+    }
+
+    // Close sockets for instances no longer wanted by anyone.
+    for (const [name, socket] of this.socketsByInstance.entries()) {
+      if (!globalWanted.has(name)) {
+        socket.disconnect();
+        this.socketsByInstance.delete(name);
+      }
+    }
   }
 
   private notifyListeners(envelope: RealtimeEnvelope): void {
@@ -129,6 +159,7 @@ export class MessagesRealtimeService implements OnModuleDestroy {
       socket.disconnect();
     }
     this.socketsByInstance.clear();
+    this.instancesByUser.clear();
   }
 }
 
