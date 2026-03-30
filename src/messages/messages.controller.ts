@@ -647,8 +647,6 @@ export class MessagesController {
         headers: { 'Content-Type': 'application/json', apikey: apiKey },
         body: JSON.stringify({
           where: { key: { remoteJid } },
-          offset: 100,
-          page: 1,
         }),
       });
 

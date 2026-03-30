@@ -100,13 +100,48 @@ export class MessagesRealtimeService implements OnModuleDestroy {
     }
   }
 
+  /**
+   * Calls Evolution API's REST endpoint to enable WebSocket events for an
+   * instance. Without this call, the traditional-mode socket connects but
+   * Evolution never emits any events on it.
+   */
+  private async configureInstanceWebsocket(baseUrl: string, apiKey: string, fullInstanceName: string): Promise<void> {
+    try {
+      const url = `${baseUrl}/websocket/set/${encodeURIComponent(fullInstanceName)}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: apiKey },
+        body: JSON.stringify({
+          websocket: {
+            enabled: true,
+            events: this.wantedEvents,
+          },
+        }),
+      });
+      if (!response.ok) {
+        this.logger.warn(
+          `WebSocket config failed for ${fullInstanceName}: HTTP ${response.status}`,
+        );
+      } else {
+        this.logger.log(`WebSocket events configured for: ${fullInstanceName}`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `WebSocket config error for ${fullInstanceName}: ${(error as Error).message}`,
+      );
+    }
+  }
+
   private ensureSocket(fullInstanceName: string): void {
     if (this.socketsByInstance.has(fullInstanceName)) return;
     const baseUrl = (process.env.WPP_API_BASE_URL || '').replace(/\/$/, '');
     const apiKey = process.env.WPP_API_KEY || '';
     if (!baseUrl || !apiKey) return;
 
-    const socketUrl = `${baseUrl}/${encodeURIComponent(fullInstanceName)}`;
+    // Tell Evolution to start emitting the events we need on this instance's socket.
+    void this.configureInstanceWebsocket(baseUrl, apiKey, fullInstanceName);
+
+    const socketUrl = `${baseUrl}/${fullInstanceName}`;
     const socket = io(socketUrl, {
       transports: ['websocket'],
       reconnection: true,
@@ -119,6 +154,8 @@ export class MessagesRealtimeService implements OnModuleDestroy {
 
     socket.on('connect', () => {
       this.logger.log(`Evolution WS connected: ${fullInstanceName}`);
+      // Re-apply websocket config on reconnect in case Evolution restarted.
+      void this.configureInstanceWebsocket(baseUrl, apiKey, fullInstanceName);
     });
     socket.on('disconnect', (reason) => {
       this.logger.warn(`Evolution WS disconnected (${fullInstanceName}): ${reason}`);
