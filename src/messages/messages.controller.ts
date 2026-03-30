@@ -2,12 +2,14 @@ import { Controller, Get, Post, Body, Param, Query, Res, Request, ForbiddenExcep
 import { Response } from 'express';
 import { InstancesService } from '../instances/instances.service';
 import { SubUsersService } from '../sub-users/sub-users.service';
+import { MessagesRealtimeService } from './messages-realtime.service';
 
 @Controller('messages')
 export class MessagesController {
   constructor(
     private readonly instancesService: InstancesService,
     private readonly subUsersService: SubUsersService,
+    private readonly messagesRealtimeService: MessagesRealtimeService,
   ) {}
 
   // =========================================================================
@@ -606,6 +608,11 @@ export class MessagesController {
         return this.getChatTimestamp(b) - this.getChatTimestamp(a);
       });
 
+      // Keep Evolution websocket relay connected only to accessible instances.
+      this.messagesRealtimeService.setWatchedInstances(
+        userInstances.map((inst: any) => inst.fullName).filter(Boolean),
+      );
+
       return res.json({
         chats: allChats,
         instances: instanceStatuses,
@@ -843,6 +850,13 @@ export class MessagesController {
           details: data,
         });
       }
+
+      this.messagesRealtimeService.emitOptimisticMessage({
+        ownerUserId: effectiveUserId,
+        instanceName,
+        fullInstanceName: prefixedInstanceName,
+        payload: data,
+      });
 
       return res.status(201).json(data);
     } catch (error) {
