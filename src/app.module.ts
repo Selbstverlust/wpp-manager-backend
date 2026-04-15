@@ -11,6 +11,7 @@ import { PublicAuthGuard } from './auth/public-auth.guard';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { AdminModule } from './admin/admin.module';
 import { PaypalModule } from './paypal/paypal.module';
+import { StripeModule } from './stripe/stripe.module';
 import { SubUsersModule } from './sub-users/sub-users.module';
 import { MessagesModule } from './messages/messages.module';
 import { CategoriesModule } from './categories/categories.module';
@@ -41,6 +42,7 @@ import { CategoriesModule } from './categories/categories.module';
     SubscriptionsModule,
     AdminModule,
     PaypalModule,
+    StripeModule,
     SubUsersModule,
     MessagesModule,
     CategoriesModule,
