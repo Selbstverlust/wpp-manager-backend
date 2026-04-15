@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Subscription, SubscriptionTier, SubscriptionStatus } from './subscription.entity';
+import { Subscription, SubscriptionTier, SubscriptionStatus, PaymentProvider } from './subscription.entity';
 
 export interface SubscriptionInfo {
   id: string;
@@ -109,6 +109,29 @@ export class SubscriptionsService {
     subscription.status = SubscriptionStatus.CANCELLED;
     subscription.tier = SubscriptionTier.FREE;
     
+    return this.repo.save(subscription);
+  }
+
+  /**
+   * Save Stripe customer ID on the subscription record (R15/T-090)
+   */
+  async saveStripeCustomerId(userId: string, stripeCustomerId: string): Promise<Subscription> {
+    const subscription = await this.getOrCreateSubscription(userId);
+    subscription.stripeCustomerId = stripeCustomerId;
+    return this.repo.save(subscription);
+  }
+
+  /**
+   * Save active Stripe subscription ID on the subscription record (R23/T-092)
+   */
+  async saveStripeSubscriptionId(
+    userId: string,
+    stripeSubscriptionId: string,
+    provider: PaymentProvider,
+  ): Promise<Subscription> {
+    const subscription = await this.getOrCreateSubscription(userId);
+    subscription.stripeSubscriptionId = stripeSubscriptionId;
+    subscription.paymentProvider = provider;
     return this.repo.save(subscription);
   }
 
