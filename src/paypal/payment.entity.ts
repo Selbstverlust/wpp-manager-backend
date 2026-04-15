@@ -9,7 +9,7 @@ import {
     Index,
 } from 'typeorm';
 import { User } from '../users/user.entity';
-import { SubscriptionTier } from '../subscriptions/subscription.entity';
+import { PaymentProvider, SubscriptionTier } from '../subscriptions/subscription.entity';
 
 export enum PaymentStatus {
     PENDING = 'pending',
@@ -66,4 +66,24 @@ export class Payment {
 
     @Column({ name: 'completed_at', type: 'timestamp', nullable: true })
     completedAt: Date | null;
+
+    @Column({ name: 'stripe_customer_id', nullable: true })
+    stripeCustomerId: string | null;
+
+    @Column({ name: 'stripe_subscription_id', nullable: true })
+    stripeSubscriptionId: string | null;
+
+    @Column({ name: 'stripe_session_id', nullable: true })
+    stripeSessionId: string | null;
+
+    @Index()
+    @Column({ name: 'stripe_event_id', nullable: true })
+    stripeEventId: string | null;
+
+    @Column({
+        name: 'payment_provider',
+        type: 'varchar',
+        default: PaymentProvider.PAYPAL,
+    })
+    paymentProvider: PaymentProvider;
 }

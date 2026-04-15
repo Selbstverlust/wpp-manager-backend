@@ -22,6 +22,11 @@ export enum SubscriptionStatus {
   CANCELLED = 'cancelled',
 }
 
+export enum PaymentProvider {
+  PAYPAL = 'paypal',
+  STRIPE = 'stripe',
+}
+
 @Entity({ name: 'subscriptions' })
 export class Subscription {
   @PrimaryGeneratedColumn('uuid')
@@ -52,6 +57,19 @@ export class Subscription {
 
   @Column({ name: 'expires_at', type: 'timestamp', nullable: true })
   expiresAt: Date | null;
+
+  @Column({ name: 'stripe_customer_id', nullable: true })
+  stripeCustomerId: string | null;
+
+  @Column({ name: 'stripe_subscription_id', nullable: true })
+  stripeSubscriptionId: string | null;
+
+  @Column({
+    name: 'payment_provider',
+    type: 'varchar',
+    nullable: true,
+  })
+  paymentProvider: PaymentProvider | null;
 
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
