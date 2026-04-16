@@ -67,6 +67,15 @@ export class MessagesRealtimeService implements OnModuleDestroy {
     });
   }
 
+  /**
+   * Routes an arbitrary envelope through the same listener pipeline used by
+   * socket-delivered events. Called by the webhook receiver to provide a
+   * fallback delivery path without duplicating relay logic.
+   */
+  relayEvent(envelope: RealtimeEnvelope): void {
+    this.notifyListeners(envelope);
+  }
+
   subscribe(listener: RealtimeListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

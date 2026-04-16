@@ -1,8 +1,22 @@
-import { Controller, Get, Post, Body, Param, Query, Res, Request, ForbiddenException, BadRequestException } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Query, Res, Request, ForbiddenException, BadRequestException, HttpCode } from '@nestjs/common';
 import { Response } from 'express';
 import { InstancesService } from '../instances/instances.service';
 import { SubUsersService } from '../sub-users/sub-users.service';
 import { MessagesRealtimeService } from './messages-realtime.service';
+import { MessagesWebhookDedupService } from './messages-webhook-dedup.service';
+import { Public } from '../auth/public.decorator';
+
+/** Event types the relay pipeline handles; matches MessagesRealtimeService.wantedEvents. */
+const RELAY_EVENTS = new Set([
+  'MESSAGES_UPSERT',
+  'MESSAGES_UPDATE',
+  'MESSAGES_DELETE',
+  'CHATS_UPSERT',
+  'CHATS_UPDATE',
+  'CHATS_DELETE',
+  'CONNECTION_UPDATE',
+  'SEND_MESSAGE',
+]);
 
 @Controller('messages')
 export class MessagesController {
@@ -10,6 +24,7 @@ export class MessagesController {
     private readonly instancesService: InstancesService,
     private readonly subUsersService: SubUsersService,
     private readonly messagesRealtimeService: MessagesRealtimeService,
+    private readonly webhookDedupService: MessagesWebhookDedupService,
   ) {}
 
   // =========================================================================
@@ -868,5 +883,60 @@ export class MessagesController {
       console.error('Error sending text message:', error);
       return res.status(500).json({ error: 'Unexpected server error' });
     }
+  }
+
+  /**
+   * POST /messages/webhook
+   *
+   * Receives Evolution API webhook deliveries and routes them through the
+   * same relay pipeline as socket-delivered events.
+   *
+   * Returns HTTP 200 immediately so Evolution API does not retry on success.
+   * Deduplicates by the message key identifier (data.key.id) to discard
+   * duplicate deliveries within a 24-hour window.
+   * Discards events whose type is not in the subscribed set (RELAY_EVENTS).
+   */
+  @Public()
+  @Post('webhook')
+  @HttpCode(200)
+  handleWebhook(@Body() body: any): { ok: boolean } {
+    const event: string = body?.event || '';
+    const fullInstanceName: string = body?.instance || '';
+
+    // Discard events outside the subscribed set.
+    if (!event || !RELAY_EVENTS.has(event)) {
+      return { ok: true };
+    }
+
+    if (!fullInstanceName) {
+      return { ok: true };
+    }
+
+    const data = body?.data ?? body;
+
+    // Deduplicate by message key identifier when present.
+    const keyId: string = data?.key?.id || '';
+    if (keyId) {
+      const dedupKey = `${event}:${fullInstanceName}:${keyId}`;
+      if (this.webhookDedupService.isProcessed(dedupKey)) {
+        return { ok: true };
+      }
+      this.webhookDedupService.markProcessed(dedupKey);
+    }
+
+    // Split "userId_instanceName" on the first underscore.
+    const separatorIdx = fullInstanceName.indexOf('_');
+    const ownerUserId = separatorIdx > 0 ? fullInstanceName.slice(0, separatorIdx) : '';
+    const instanceName = separatorIdx > 0 ? fullInstanceName.slice(separatorIdx + 1) : fullInstanceName;
+
+    this.messagesRealtimeService.relayEvent({
+      event,
+      fullInstanceName,
+      instanceName,
+      ownerUserId,
+      payload: data,
+    });
+
+    return { ok: true };
   }
 }
