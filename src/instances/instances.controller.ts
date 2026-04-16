@@ -374,12 +374,20 @@ export class InstancesController {
       const prefixedInstanceName = this.service.getPrefixedInstanceName(userId, name);
       const url = `${baseUrl.replace(/\/$/, '')}/webhook/set/${encodeURIComponent(prefixedInstanceName)}`;
 
+      // Event scope must match cavekit-messaging.md R3 (relay pipeline events).
       const webhookConfig = {
         webhook: {
           byEvents: false,
           base64: true,
           events: [
-            "MESSAGES_UPSERT"
+            'MESSAGES_UPSERT',
+            'MESSAGES_UPDATE',
+            'MESSAGES_DELETE',
+            'CHATS_UPSERT',
+            'CHATS_UPDATE',
+            'CHATS_DELETE',
+            'CONNECTION_UPDATE',
+            'SEND_MESSAGE',
           ],
           enabled: true,
           url: webhookUrl
