@@ -10,5 +10,6 @@ Implements:
 - cavekit-messaging.md R7 (JID Normalization)
 - cavekit-messaging.md R8 (Message History)
 - cavekit-messaging.md R9 (Send Text Message)
+- cavekit-messaging.md R10 (Webhook Event Receiver)
 
-Build tasks: T-008, T-059, T-060, T-061, T-062, T-073, T-074, T-075, T-083 (build-site.md)
+Build tasks: T-008, T-059, T-060, T-061, T-062, T-073, T-074, T-075, T-083, T-100, T-101, T-102 (build-site.md)

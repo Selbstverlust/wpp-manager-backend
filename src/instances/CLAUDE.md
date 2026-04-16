@@ -12,4 +12,4 @@ Implements:
 - cavekit-instances.md R9 (n8n Prompt Endpoint)
 - cavekit-instances.md R10 (Instance Webhook Configuration)
 
-Build tasks: T-036, T-037, T-045, T-046, T-047, T-048, T-049, T-050, T-051, T-052, T-053 (build-site.md)
+Build tasks: T-036, T-037, T-045, T-046, T-047, T-048, T-049, T-050, T-051, T-052, T-053, T-104 (build-site.md)
