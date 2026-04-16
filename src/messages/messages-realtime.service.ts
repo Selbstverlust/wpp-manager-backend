@@ -14,7 +14,10 @@ type RealtimeListener = (envelope: RealtimeEnvelope) => void;
 @Injectable()
 export class MessagesRealtimeService implements OnModuleDestroy {
   private readonly logger = new Logger(MessagesRealtimeService.name);
+  /** Confirmed-active sockets (configureInstanceWebsocket succeeded). */
   private readonly socketsByInstance = new Map<string, Socket>();
+  /** All socket objects — active or reconnecting. Prevents duplicate creation. */
+  private readonly socketRefs = new Map<string, Socket>();
   private readonly listeners = new Set<RealtimeListener>();
   /** Tracks which full instance names each owner user wants to watch. */
   private readonly instancesByUser = new Map<string, Set<string>>();
@@ -82,10 +85,11 @@ export class MessagesRealtimeService implements OnModuleDestroy {
     }
 
     // Close sockets for instances no longer wanted by anyone.
-    for (const [name, socket] of this.socketsByInstance.entries()) {
+    for (const [name, socket] of this.socketRefs.entries()) {
       if (!globalWanted.has(name)) {
         socket.disconnect();
         this.socketsByInstance.delete(name);
+        this.socketRefs.delete(name);
       }
     }
   }
@@ -101,45 +105,69 @@ export class MessagesRealtimeService implements OnModuleDestroy {
   }
 
   /**
-   * Calls Evolution API's REST endpoint to enable WebSocket events for an
-   * instance. Without this call, the traditional-mode socket connects but
-   * Evolution never emits any events on it.
+   * Calls /websocket/set to enable event emission for this instance.
+   * Throws on non-2xx so the caller can decide not to mark the socket active.
+   * Fires on every socket `connect` event (initial + reconnect) to re-arm
+   * Evolution API event toggles after a server restart (Issue #1559).
    */
-  private async configureInstanceWebsocket(baseUrl: string, apiKey: string, fullInstanceName: string): Promise<void> {
+  private async configureInstanceWebsocket(
+    baseUrl: string,
+    apiKey: string,
+    fullInstanceName: string,
+  ): Promise<void> {
+    const url = `${baseUrl}/websocket/set/${encodeURIComponent(fullInstanceName)}`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', apikey: apiKey },
+      body: JSON.stringify({
+        websocket: { enabled: true, events: this.wantedEvents },
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text().catch(() => '');
+      const msg = `/websocket/set failed for ${fullInstanceName}: HTTP ${response.status} — ${body}`;
+      this.logger.error(msg);
+      throw new Error(msg);
+    }
+    this.logger.log(`WebSocket events configured for: ${fullInstanceName}`);
+  }
+
+  /**
+   * Awaits /websocket/set and marks the socket active only on success.
+   * Called from the `connect` handler so it fires on both initial connect
+   * and every reconnect, re-arming Evolution event toggles each time.
+   */
+  private async activateSocket(
+    fullInstanceName: string,
+    socket: Socket,
+    baseUrl: string,
+    apiKey: string,
+  ): Promise<void> {
     try {
-      const url = `${baseUrl}/websocket/set/${encodeURIComponent(fullInstanceName)}`;
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', apikey: apiKey },
-        body: JSON.stringify({
-          websocket: {
-            enabled: true,
-            events: this.wantedEvents,
-          },
-        }),
-      });
-      if (!response.ok) {
-        this.logger.warn(
-          `WebSocket config failed for ${fullInstanceName}: HTTP ${response.status}`,
-        );
-      } else {
-        this.logger.log(`WebSocket events configured for: ${fullInstanceName}`);
+      await this.configureInstanceWebsocket(baseUrl, apiKey, fullInstanceName);
+      // Store as active only if the instance is still tracked (not cleaned up).
+      if (this.socketRefs.has(fullInstanceName)) {
+        this.socketsByInstance.set(fullInstanceName, socket);
+        this.logger.log(`Socket fully active: ${fullInstanceName}`);
       }
-    } catch (error) {
-      this.logger.warn(
-        `WebSocket config error for ${fullInstanceName}: ${(error as Error).message}`,
-      );
+    } catch {
+      // Error already logged by configureInstanceWebsocket.
+      // Remove from active map; socket.io will reconnect and retry activation.
+      this.socketsByInstance.delete(fullInstanceName);
     }
   }
 
   private ensureSocket(fullInstanceName: string): void {
-    if (this.socketsByInstance.has(fullInstanceName)) return;
+    if (this.socketRefs.has(fullInstanceName)) return; // Already exists (active or reconnecting)
+
     const baseUrl = (process.env.WPP_API_BASE_URL || '').replace(/\/$/, '');
     const apiKey = process.env.WPP_API_KEY || '';
-    if (!baseUrl || !apiKey) return;
-
-    // Tell Evolution to start emitting the events we need on this instance's socket.
-    void this.configureInstanceWebsocket(baseUrl, apiKey, fullInstanceName);
+    if (!baseUrl || !apiKey) {
+      this.logger.error(
+        'WPP_API_BASE_URL or WPP_API_KEY missing — realtime socket connections disabled',
+      );
+      return;
+    }
 
     const socketUrl = `${baseUrl}/${fullInstanceName}`;
     const socket = io(socketUrl, {
@@ -154,14 +182,24 @@ export class MessagesRealtimeService implements OnModuleDestroy {
 
     socket.on('connect', () => {
       this.logger.log(`Evolution WS connected: ${fullInstanceName}`);
-      // Re-apply websocket config on reconnect in case Evolution restarted.
-      void this.configureInstanceWebsocket(baseUrl, apiKey, fullInstanceName);
+      // Await /websocket/set before marking socket active.
+      // Fires on initial connect AND every reconnect (re-arms event toggles).
+      void this.activateSocket(fullInstanceName, socket, baseUrl, apiKey);
     });
-    socket.on('disconnect', (reason) => {
+
+    socket.on('disconnect', (reason: string) => {
       this.logger.warn(`Evolution WS disconnected (${fullInstanceName}): ${reason}`);
+      // Remove from active map. Socket.io will reconnect automatically;
+      // the connect handler will re-activate on next successful connect.
+      this.socketsByInstance.delete(fullInstanceName);
     });
-    socket.on('connect_error', (error) => {
-      this.logger.warn(`Evolution WS error (${fullInstanceName}): ${error.message}`);
+
+    socket.on('connect_error', (error: Error) => {
+      this.logger.warn(`Evolution WS connect_error (${fullInstanceName}): ${error.message}`);
+    });
+
+    socket.on('error', (error: Error) => {
+      this.logger.error(`Evolution WS error (${fullInstanceName}): ${String(error)}`);
     });
 
     for (const eventName of this.wantedEvents) {
@@ -178,7 +216,9 @@ export class MessagesRealtimeService implements OnModuleDestroy {
       });
     }
 
-    this.socketsByInstance.set(fullInstanceName, socket);
+    // Track socket ref immediately for cleanup; socketsByInstance set only after
+    // /websocket/set succeeds in activateSocket.
+    this.socketRefs.set(fullInstanceName, socket);
   }
 
   private extractOwnerUserId(fullInstanceName: string): string {
@@ -192,9 +232,10 @@ export class MessagesRealtimeService implements OnModuleDestroy {
   }
 
   onModuleDestroy(): void {
-    for (const socket of this.socketsByInstance.values()) {
+    for (const socket of this.socketRefs.values()) {
       socket.disconnect();
     }
+    this.socketRefs.clear();
     this.socketsByInstance.clear();
     this.instancesByUser.clear();
   }
