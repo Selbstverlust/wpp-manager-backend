@@ -125,8 +125,7 @@ export class StripeService implements OnModuleInit {
         });
 
         // Create pending payment record with idempotency key
-        const { v4: uuidv4 } = await import('uuid');
-        const idempotencyKey = uuidv4();
+        const idempotencyKey = crypto.randomUUID();
         const payment = this.paymentRepo.create({
             userId,
             amount: 0,
