@@ -17,6 +17,8 @@ npm-debug.log*
 # IDE
 .idea/
 .vscode/
+.claude/
+CLAUDE.md
 *.swp
 *.swo
 
