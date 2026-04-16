@@ -55,7 +55,7 @@ export class StripeController {
             throw new BadRequestException('success_url and cancel_url are required');
         }
 
-        const userId = req.user.sub as string;
+        const userId = req.user.id as string;
         const userEmail = req.user.email as string;
 
         return this.stripeService.createCheckoutSession(
@@ -75,7 +75,7 @@ export class StripeController {
         @Req() req: any,
         @Body() body: VerifySessionDto,
     ) {
-        const userId = req.user.sub as string;
+        const userId = req.user.id as string;
         await this.stripeService.verifyCheckoutSession(userId, body.sessionId);
         return { success: true };
     }
@@ -86,7 +86,7 @@ export class StripeController {
     @Post('cancel-subscription')
     @HttpCode(HttpStatus.OK)
     async cancelSubscription(@Req() req: any) {
-        const userId = req.user.sub as string;
+        const userId = req.user.id as string;
         await this.stripeService.cancelStripeSubscription(userId);
         return { success: true };
     }
